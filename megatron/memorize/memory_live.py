@@ -69,8 +69,6 @@ class _MemoryBuffer:
 
         self.memories = np.zeros(
             (memory_size, device_batch_size, hidden_size),
-            dtype=np.float16,
-        )
         self.clear()
 
     def clear(self):
@@ -139,7 +137,7 @@ class _MemoryPartition:
             self.valid_from[i] = 0
             self.first_token[i] = 0
 
-    def add_memories(self, new_memories, eod_markers):
+    def add_memories(self, new_memories, eod_markers, qkv_func):
         """
             new_memories: [sq, b, h]
             eod_markers

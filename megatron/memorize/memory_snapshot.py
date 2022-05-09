@@ -18,7 +18,9 @@ class _MemorySnapshot:
 
         self.stats = {}
 
-    def get_partition(self, training):
+    def get_partition(self, training, partition_idx):
+        if training or partition_idx != 0:
+            raise ValueException("_MemorySnapshot doesn't support training.")
         # Unlike with live memory, memory snapshot has no separate partition for evaluation and
         # training.
         return self
@@ -26,7 +28,7 @@ class _MemorySnapshot:
     def add_memories(self, *args, **kwargs):
         return
 
-    def get_memories(self, device, queries, eod_markers):
+    def get_memories(self, device, queries, eod_markers, qkv_func):
         """
         # queries: [sq, b, np, hn]
         """

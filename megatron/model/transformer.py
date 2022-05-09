@@ -335,40 +335,28 @@ class ParallelSelfAttention(nn.Module):
 
             device = torch.cuda.current_device()
 
-            if self.memorize_mode == "save":
-                Path(neox_args.memory_save).mkdir(exist_ok = True, parents = True)
-                def init_dumper(training):
-                    if training:
-                        # When memory_save is set, we should only dump during eval, not during
-                        # training.
-                        return None
-
-                    mem_file = get_mem_dump_path(neox_args.memory_save, layer_number)
-                    return memorize.MemoryDumper(
-                        layer_number = layer_number,
-                        file_path = mem_file,
-                        dim = self.hidden_size_per_attention_head,
-                        heads = self.num_attention_heads_per_partition,
-                        index_memory_func = index_memory_snapshot
-                    )
-                memory_dumper_init = init_dumper
-            else:
-                memory_dumper_init = None
-
             if self.memorize_mode == "load":
                 # Load precomputed memories from the specified index
-                self.memory_snap = load_memory_snapshot(neox_args.memory_load, layer_number)
-                self.memory_train = None
-            else:
+                self.memory = load_memory_snapshot(neox_args.memory_load, layer_number)
+            elif self.memorize_mode == "save":
+                Path(neox_args.memory_save).mkdir(exist_ok = True, parents = True)
+                mem_file = get_mem_dump_path(neox_args.memory_save, layer_number)
+                self.memory = memorize.MemoryDumper(
+                    layer_number = layer_number,
+                    file_path = mem_file,
+                    dim = self.hidden_size_per_attention_head,
+                    heads = self.num_attention_heads_per_partition,
+                    index_memory_func = index_memory_snapshot
+                )
+            elif self.memorize_mode == "train":
                 # Maintain a sliding window of memories
-                self.memory_train = memorize.MemoryLive(
+                self.memory = memorize.MemoryLive(
                     device,
                     neox_args.memory_size,
                     neox_args.train_micro_batch_size_per_gpu,
                     neox_args.hidden_size,
                     neox_args.memory_invalid_query_mode,
                     self.partition_count)
-                self.memory_snap = None
             self.partition_idx = 0
 
 
@@ -525,8 +513,8 @@ class ParallelSelfAttention(nn.Module):
         # [sq, b, h] --> 3 [sq, b, np, hn]
         (query_layer, key_layer, value_layer) = self.hidden_to_qkv(hidden_states, self.query_key_value)
 
-        if self.is_knn() and self.memorize_mode == "train":
-            mem_train = self.memory_train.get_partition(self.training, self.partition_idx)
+        if self.is_knn():
+            mem = self.memory.get_partition(self.training, self.partition_idx)
             if self.training:
                 self.partition_idx = (self.partition_idx + 1) % self.partition_count
 
@@ -535,7 +523,7 @@ class ParallelSelfAttention(nn.Module):
 
             hidden_states_to_mem = hidden_states.clone().detach()
         else:
-            mem_train = None
+            mem = None
 
         if exists(self.rotary_emb):
             if exists(self.rotary_ndims):
@@ -601,7 +589,10 @@ class ParallelSelfAttention(nn.Module):
                 assert attention_mask.shape == (1, 1, 1, sz_keys)
                 assert (~attention_mask).all()
 
-            if not self.is_knn() or mem_train.is_empty():
+            def hidden_to_qkv_mem(hidden_states):
+                return self.hidden_to_qkv(hidden_states, self.query_key_value_mem, normalize=False)
+
+            if not self.is_knn() or mem.is_empty():
                 context_layer = self.attention(
                     query_layer, key_layer, value_layer, layer_past, attention_mask,
                 )
@@ -609,21 +600,18 @@ class ParallelSelfAttention(nn.Module):
             else:
                 assert self.attention_type == "knn_both"
 
-                # use cosine distance
-                use_cosine_sim=False
-
                 context_layer = self.attention(
                     query_layer, key_layer, value_layer, layer_past, attention_mask,
                 )
 
-                mem_query, key_layer2, value_layer2 = self.hidden_to_qkv(hidden_states, self.query_key_value_mem, normalize=use_cosine_sim)
+                mem_query, key_layer2, value_layer2 = hidden_to_qkv_mem(hidden_states)
 
                 # Extract keys and values from memory
-                mem_keys, mem_vals, mem_mask = mem_train.get_memories(
+                mem_keys, mem_vals, mem_mask = mem.get_memories(
                     key_layer.device,
                     mem_query,
                     eod_markers,
-                    lambda past_hidden_states: self.hidden_to_qkv(past_hidden_states, self.query_key_value_mem, normalize=use_cosine_sim)
+                    hidden_to_qkv_mem,
                 )
 
                 mem_context_layer = self.attention(
@@ -641,7 +629,7 @@ class ParallelSelfAttention(nn.Module):
 
         # Store the memories
         if self.is_knn():
-            mem_train.add_memories(hidden_states_to_mem, eod_markers)
+            mem.add_memories(hidden_states_to_mem, eod_markers, hidden_to_qkv_mem)
 
         output, bias = self.densify(context_layer, self.dense)
 

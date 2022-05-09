@@ -22,8 +22,31 @@ class MemoryDumper:
         }
         pickle.dump(header, self.file)
 
-    def dump(self, record):
-        # if the current batch is full, close it
+    def get_partition(self, training, partition_idx):
+        if training or partition_idx != 0:
+            return None
+
+        return self
+
+    def get_memories(self, device, queries, eod_markers, qkv_func):
+        return None
+
+
+    def is_empty(self):
+        return True
+
+    def add_memories(self, new_memories, eod_markers, qkv_func):
+        _, keys, values = qkv_func(new_memories)
+
+        if keys.shape[1] != 1:
+            raise ValueError("MemoryDumper only supports batch size of 1")
+
+        # squeeze out the batch dimension
+        keys = keys.squeeze(dim=1).cpu()
+        values = values.squeeze(dim=1).cpu()
+        record = [keys, values]
+
+        # if the file exceeds the size limit, raise an error
         if self.file.tell() > self.file_bytes_limit:
             raise ValueError("MemoryDumper reached the limit of {} bytes.".format(self.file_bytes_limit))
 
